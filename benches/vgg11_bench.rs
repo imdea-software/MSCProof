@@ -53,12 +53,16 @@ macro_rules! vgg11_prover_bench {
             /*--------------- Loading the execution of VGG11 ---------------*/
             /*--------------------------------------------------------------*/
 
-            let mut save_file = File::open("VGG11_execution_description.txt").unwrap();
-            let mut file_content = Vec::new();
-            save_file
-                .read_to_end(&mut file_content)
-                .unwrap();
-            let layers_conv = Vec::<LayerInfoConv<Fr>>::deserialize(file_content.as_slice()).unwrap();
+            let mut layers_conv = Vec::<LayerInfoConv<Fr>>::new();
+
+            for i in 1..=8 {
+                let mut save_file = File::open(format!("VGG11_exec/VGG11_conv{}_execution_description.txt", i)).unwrap();
+                let mut file_content = Vec::new();
+                save_file
+                    .read_to_end(&mut file_content)
+                    .unwrap();
+                layers_conv.push(LayerInfoConv::<Fr>::deserialize(file_content.as_slice()).unwrap());
+            }
 
             /*--------------------------------------------------------*/
             /*--------------- Computing the output MLE ---------------*/
