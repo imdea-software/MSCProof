@@ -17,6 +17,9 @@ use crate::utils::{
     DimOD,
 };
 
+use crate::ipformlsumcheck::prover::ProverMsg;
+use crate::data_structures::ListOfProductsOfPolynomials;
+
 pub mod matmul;
 pub mod mlsumcheck;
 pub mod general_prover;
@@ -24,11 +27,14 @@ pub mod general_verifier;
 pub mod CNN;
 pub mod ipformlsumcheck;
 pub mod data_structures;
+pub mod layer_verifier;
 
 #[macro_use]
 pub mod utils;
 pub mod conv;
 
+#[cfg(test)]
+pub mod test;
 
 
 pub type ModelExecution<T> = Vec<LayerInfo<T>>;
@@ -100,4 +106,13 @@ pub struct LayerInfoDense<F: Field> {
     pub dim_input: DimID,
     pub dim_kernel: DimKD,
     pub dim_output: DimOD,
+}
+
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct LayerProverOutput<F: Field> {
+        // Proof of MLSC
+        pub claimed_values: (F,F),
+        pub prover_msgs: Vec<ProverMsg<F>>,
+        pub polynomial: ListOfProductsOfPolynomials<F>,
 }

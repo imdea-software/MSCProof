@@ -3,21 +3,28 @@ use ark_ec::PairingEngine;
 use ark_ff::{Field, PrimeField};
 
 use ark_std::vec::Vec;
-use ark_linear_sumcheck::rng::Blake2s512Rng;
+use ark_linear_sumcheck::rng::{Blake2s512Rng, FeedableRNG};
 
 // use ark_serialize::Read;
 // use ark_serialize::SerializationError;
 // use ark_serialize::Write;
 
-use crate::{LayerInfo, LayerInfoConv, ModelExecution};
-use crate::matmul::{ProverMatMul, ProverMatMulOutput};
+use crate::{LayerInfo, LayerInfoConv, ModelExecution, LayerProverOutput};
+use crate::matmul::ProverMatMul;
+use crate::conv::{ProverConv2D, ProverConvOutput};
+
 
 use crate::CNN::prover::{ProverCNN, ProverCNNOutput};
 
-use crate::utils::conv_layer_output_to_flatten;
+use crate::utils::{
+    conv_layer_output_to_flatten,
+    matrix_reshape_predicate,
+    predicate_processing,
+};
+use crate::log2i;
 
 use std::collections::HashMap;
-// use std::time::Instant;
+use std::time::Instant;
 
 use derive_new::new;
 
@@ -57,30 +64,31 @@ use derive_new::new;
 
 #[derive(new)]
 pub struct GeneralProver<'a, E: PairingEngine<Fr=F>, F: Field> {
+    // List from first layer to last
     pub model_exec: ModelExecution<F>,
     // Created from first layer to last
     pub prover_modules: Vec<ProverModule<'a, E, F>>,
     pub output_randomness: Vec<F>,
-    pub fs_rng: Option<&'a mut Blake2s512Rng>,
     #[new(default)]
     pub times: HashMap<String, u128>,
     #[new(default)]
-    pub general_prover_output: GeneralProverOutput<E,F>,
+    pub general_prover_output: GeneralProverOutput<F>,
 }
 
-pub type GeneralProverOutput<E,F> = Vec<ProverOutput<E,F>>;
+pub type GeneralProverOutput<F> = Vec<ProverOutput<F>>;
 
 
 #[derive(Clone)]
-pub enum ProverOutput<E: PairingEngine<Fr=F>, F:Field> {
-    CNNOutput(ProverCNNOutput<E, F>),
-    DenseOutput(ProverMatMulOutput<F>),
+pub enum ProverOutput<F:Field> {
+    CNNOutput(ProverCNNOutput<F>),
+    ConvOutput(ProverConvOutput<F>),
+    DenseOutput(LayerProverOutput<F>),
 }
 
 // #[derive(Clone)]
 pub enum ProverModule<'a, E: PairingEngine<Fr=F>, F:Field> {
     CNN(ProverCNN<'a, E, F>),
-    MatMul(ProverMatMul<'a, F>),
+    MatMul(ProverMatMul<F>),
 }
 
 // General structure for prover messages
@@ -126,7 +134,7 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralProver<'a, E, F> 
                             ProverModule::CNN(ProverCNN::new(
                                 cnn_module, 
                                 None, 
-                                None
+                                // None
                             ))
                         );
                         cnn_module = Vec::<LayerInfoConv<F>>::new();
@@ -142,8 +150,8 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralProver<'a, E, F> 
                         l.kernel.clone(), 
                         dim_input_flatten, 
                         l.dim_kernel, 
-                        initial_randomness,
-                        None,
+                        initial_randomness.unwrap(),
+                        // None,
                     );
 
                     mm_module.name = l.name.clone();
@@ -163,7 +171,7 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralProver<'a, E, F> 
                     ProverCNN::new(
                         cnn_module, 
                         initial_randomness, 
-                        None
+                        // None
                         )
                     )
             );
@@ -173,9 +181,10 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralProver<'a, E, F> 
 
     }
 
-    pub fn prove_model(&mut self) -> GeneralProverOutput<E,F>{
+    pub fn prove_model(&mut self) -> GeneralProverOutput<F>{
 
-        let mut fs_rng =self.fs_rng.take();
+        let mut fs_rng = Blake2s512Rng::setup();
+
         let mut init_randomness = Vec::<F>::new();
         let mut gp_output = Vec::new();
 
@@ -192,14 +201,14 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralProver<'a, E, F> 
                         pm.output_randomness = Some(init_randomness);
                     }
 
-                    pm.fs_rng = fs_rng.take();
-                    pm.prove_CNN();
+                    // pm.fs_rng = fs_rng.take();
+                    pm.prove_CNN(&mut fs_rng);
 
                     gp_output.push(
                         ProverOutput::CNNOutput(pm.layer_outputs.clone().unwrap())
                     );
 
-                    fs_rng = pm.fs_rng.take();
+                    // fs_rng = pm.fs_rng.take();
                     init_randomness = pm.input_randomness.clone().unwrap();
 
                     self.times.extend(pm.times.clone());
@@ -211,18 +220,18 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralProver<'a, E, F> 
 
                     println!("PROVING DENSE LAYER");
 
-                    if pm.initial_randomness == None {
-                        pm.initial_randomness = Some(init_randomness);
+                    if pm.initial_randomness.len() == 0 {
+                        pm.initial_randomness = init_randomness;
                     }
 
-                    pm.fs_rng = fs_rng.take();
-                    let result = pm.prove();
+                    // pm.fs_rng = fs_rng.take();
+                    let result = pm.prove(&mut fs_rng);
 
                     gp_output.push(
                         ProverOutput::DenseOutput(result.unwrap())
                     );
 
-                    fs_rng = pm.fs_rng.take();
+                    // fs_rng = pm.fs_rng.take();
                     init_randomness = pm.input_randomness.clone().unwrap();
 
                     self.times.extend(pm.times.clone());
@@ -233,5 +242,324 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralProver<'a, E, F> 
         }
         
         gp_output
+    }
+
+    // Prove function consuming the prover to avoid memory issues
+    pub fn streaming_prove(mut self, fs_rng: &mut Blake2s512Rng) -> (GeneralProverOutput<F>, HashMap<String, u128>,) {
+
+        
+        let mut cnn_module = Vec::<LayerInfoConv<F>>::new();
+        let mut gp_output: Vec<ProverOutput<F>> = Vec::new();
+
+        let mut initial_randomness = Some(self.output_randomness);
+
+        for layer_info in self.model_exec.into_iter().rev() {
+
+            match layer_info {
+
+                // l takes the value of what is inside the enum
+                LayerInfo::LIC(l) => {
+                    cnn_module.push(l);
+                },
+
+                // l takes the value of what is inside the enum
+                LayerInfo::LID(l) => {
+
+                    if cnn_module.len() >= 1 {
+
+                        // reversing list as the prover cnn take layer info
+                        // from input to output
+                        let rev_cnn_module = cnn_module
+                            .into_iter()
+                            .rev()
+                            .collect();
+
+                        let mut pm = ProverCNN::<E, _>::new(
+                                rev_cnn_module, 
+                                initial_randomness, 
+                                // None
+                        );
+                        
+                        println!("PROVING CNN LAYER(S)");
+    
+                        // pm.fs_rng = fs_rng.take();
+                        pm.prove_CNN(fs_rng);
+    
+                        gp_output.push(
+                            ProverOutput::CNNOutput(pm.layer_outputs.unwrap())
+                        );
+    
+                        // fs_rng = pm.fs_rng.take();
+                        initial_randomness = pm.input_randomness;
+                        
+                        cnn_module = Vec::<LayerInfoConv<F>>::new();
+                    }
+
+                    let dim_input = (l.input.len(), l.input[0].len(), l.input[0][0].len());
+                    // Flattening the input of the convolution
+                    let mat_L = conv_layer_output_to_flatten(&l.input, dim_input);
+                    let dim_input_flatten = (1,mat_L.len());
+
+                    let mut pm = ProverMatMul::new(
+                        vec![mat_L],
+                        l.kernel, 
+                        dim_input_flatten, 
+                        l.dim_kernel, 
+                        initial_randomness.unwrap(),
+                        // None,
+                    );
+                    pm .name = l.name;
+
+
+                    println!("PROVING DENSE LAYER");
+
+                    // pm.fs_rng = fs_rng.take();
+                    // pm.fs_rng = Some(&mut fs_rng);
+                    let result = pm.prove(fs_rng);
+
+                    gp_output.push(
+                        ProverOutput::DenseOutput(result.unwrap())
+                    );
+
+                    // fs_rng = pm.fs_rng.take();
+                    initial_randomness = pm.input_randomness;
+
+                    self.times.extend(pm.times.clone());
+                    // initial_randomness = None;
+
+                }
+            }
+            
+        }
+        
+        if cnn_module.len() >= 1 {
+            
+            let rev_cnn_module = cnn_module
+                .into_iter()
+                .rev()
+                .collect();
+                
+            let mut pm = ProverCNN::<E, _>::new(
+                rev_cnn_module, 
+                initial_randomness, 
+                // None
+            );
+
+            println!("PROVING CNN LAYER(S)");
+                    
+            // pm.fs_rng = fs_rng.take();
+            pm.prove_CNN(fs_rng);
+
+            gp_output.push(
+                ProverOutput::CNNOutput(pm.layer_outputs.unwrap())
+            );
+
+            self.times.extend(pm.times.clone());
+
+        }
+
+        (gp_output, self.times)
+    }
+
+    // Prove function consuming the prover to avoid memory issues
+    // Proves each layers independantly
+    pub fn streaming_prove_all_layers(mut self, fs_rng: &mut Blake2s512Rng) -> (GeneralProverOutput<F>, HashMap<String, u128>,){
+
+        
+        let mut gp_output: Vec<ProverOutput<F>> = Vec::new();
+        let mut initial_randomness = self.output_randomness;
+
+        for layer_info in self.model_exec.into_iter().rev() {
+
+            match layer_info {
+
+                // l takes the value of what is inside the enum
+                LayerInfo::LIC(l) => {
+
+                    let now_layer = Instant::now();
+
+                
+                    // predicate processing
+                    let (predicate, dim_input_reshape) = matrix_reshape_predicate(
+                        l.dim_input,
+                        l.dim_kernel, 
+                        l.padding,
+                        l.strides, 
+                    );
+                    let predicate_mle = predicate_processing::<F>(
+                        predicate, 
+                        l.dim_input, 
+                        dim_input_reshape
+                    );
+
+                    let mut layer_prover = ProverConv2D::<E, F>::new(
+                        l.input.clone(),
+                        l.kernel.clone(),
+                        l.strides,
+                        l.padding,
+                        l.dim_input,
+                        l.dim_kernel,
+                        Vec::<F>::new(),
+                        initial_randomness.clone(), 
+                    );
+                    layer_prover.name = l.name.clone();
+                    layer_prover.mles = HashMap::from([("predicate_mle", predicate_mle)]);
+                    
+                    println!("PROVING CONV LAYER {}", l.name.clone());
+
+                    let layer_output = layer_prover.prove(fs_rng).unwrap();
+
+                    let elapsed_time_layer = now_layer.elapsed();
+                    self.times.insert(format!("time_for_proving_layer_{}", l.name), elapsed_time_layer.as_micros());
+                    
+                    self.times.extend(layer_prover.times.into_iter());
+
+                    gp_output.push(
+                        ProverOutput::ConvOutput(layer_output)
+                    );
+
+                    let conv_sc_rand = layer_prover.prover_state_conv.clone().unwrap().randomness;
+                    let reshape_sc_rand = layer_prover.prover_state_reshape.clone().unwrap().randomness;
+                    let (_, rsigma) = conv_sc_rand.split_at(log2i!(dim_input_reshape.2));
+                    initial_randomness = Vec::from([reshape_sc_rand, rsigma.into()].concat());
+                },
+
+                // l takes the value of what is inside the enum
+                LayerInfo::LID(l) => {
+
+
+                    let dim_input = (l.input.len(), l.input[0].len(), l.input[0][0].len());
+                    // Flattening the input of the convolution
+                    let mat_L = conv_layer_output_to_flatten(&l.input, dim_input);
+                    let dim_input_flatten = (1,mat_L.len());
+
+                    let mut layer_prover = ProverMatMul::new(
+                        vec![mat_L],
+                        l.kernel, 
+                        dim_input_flatten, 
+                        l.dim_kernel, 
+                        initial_randomness,
+                    );
+                    layer_prover .name = l.name;
+
+
+                    println!("PROVING DENSE LAYER");
+
+                    // pm.fs_rng = fs_rng.take();
+                    let result = layer_prover.prove(fs_rng);
+
+                    gp_output.push(
+                        ProverOutput::DenseOutput(result.unwrap())
+                    );
+
+                    // fs_rng = pm.fs_rng.take();
+                    initial_randomness = layer_prover.input_randomness.unwrap();
+
+                    // self.times.extend(pm.times.clone());
+                    // initial_randomness = None;
+
+                }
+            }
+            
+        }
+        
+        let rev_gp_output = gp_output
+            .into_iter()
+            .rev()
+            .collect();
+
+        (rev_gp_output, self.times)
+    }
+
+
+    // Prove function using a layer description to prove a layer
+    // independantly to avoid memory issues
+    // Updates the general prover randomness for successive uses
+    pub fn prove_next_layer(&mut self, layer_info: LayerInfo<F>, fs_rng: &mut Blake2s512Rng) -> (ProverOutput<F>, HashMap<String, u128>,){
+
+        let layer_proof: ProverOutput<F>;
+        let initial_randomness = self.output_randomness.clone();
+
+        match layer_info {
+
+            // l takes the value of what is inside the enum
+            LayerInfo::LIC(l) => {
+
+                let now_layer = Instant::now();
+
+                // predicate processing
+                let (predicate, dim_input_reshape) = matrix_reshape_predicate(
+                    l.dim_input,
+                    l.dim_kernel, 
+                    l.padding,
+                    l.strides, 
+                );
+                let predicate_mle = predicate_processing::<F>(
+                    predicate, 
+                    l.dim_input, 
+                    dim_input_reshape
+                );
+
+                let mut layer_prover = ProverConv2D::<E, F>::new(
+                    l.input.clone(),
+                    l.kernel.clone(),
+                    l.strides,
+                    l.padding,
+                    l.dim_input,
+                    l.dim_kernel,
+                    Vec::<F>::new(),
+                    initial_randomness.clone(), 
+                );
+                layer_prover.name = l.name.clone();
+                layer_prover.mles = HashMap::from([("predicate_mle", predicate_mle)]);
+                
+                println!("PROVING CONV LAYER {}", l.name.clone());
+
+                let layer_output = layer_prover.prove(fs_rng).unwrap();
+
+                let elapsed_time_layer = now_layer.elapsed();
+                self.times.insert(format!("time_for_proving_layer_{}", l.name), elapsed_time_layer.as_micros());
+                
+                self.times.extend(layer_prover.times.into_iter());
+
+                layer_proof = ProverOutput::ConvOutput(layer_output);
+                
+                let conv_sc_rand = layer_prover.prover_state_conv.clone().unwrap().randomness;
+                let reshape_sc_rand = layer_prover.prover_state_reshape.clone().unwrap().randomness;
+                let (_, rsigma) = conv_sc_rand.split_at(log2i!(dim_input_reshape.2));
+                self.output_randomness = Vec::from([reshape_sc_rand, rsigma.into()].concat());
+            },
+
+            // l takes the value of what is inside the enum
+            LayerInfo::LID(l) => {
+
+
+                let dim_input = (l.input.len(), l.input[0].len(), l.input[0][0].len());
+                // Flattening the input of the convolution
+                let mat_L = conv_layer_output_to_flatten(&l.input, dim_input);
+                let dim_input_flatten = (1,mat_L.len());
+
+                let mut layer_prover = ProverMatMul::new(
+                    vec![mat_L],
+                    l.kernel, 
+                    dim_input_flatten, 
+                    l.dim_kernel, 
+                    initial_randomness,
+                );
+                layer_prover .name = l.name;
+
+
+                println!("PROVING DENSE LAYER");
+
+                let result = layer_prover.prove(fs_rng);
+
+                layer_proof = ProverOutput::DenseOutput(result.unwrap());
+
+                self.output_randomness = layer_prover.input_randomness.unwrap();
+
+            }
+        }
+
+        (layer_proof, self.times.clone())
     }
 }

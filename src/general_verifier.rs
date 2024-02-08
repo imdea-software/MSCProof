@@ -1,4 +1,3 @@
-use ark_ec::PairingEngine;
 // //! Verifier
 use ark_ff::{Field, PrimeField};
 
@@ -7,36 +6,37 @@ use ark_linear_sumcheck::rng::Blake2s512Rng;
 
 use crate::CNN::verifier::VerifierCNN;
 use crate::general_prover::ProverOutput;
-use crate::{LayerInfo, LayerInfoConv,ModelExecution};
+use crate::{LayerInfo, LayerInfoConv, ModelExecution};
 use crate::matmul::VerifierMatMul;
 
+use crate::layer_verifier::LayerVerifier;
 
-pub enum VerifierModule<'a, E: PairingEngine<Fr=F>, F:Field> {
-    CNN(VerifierCNN<'a, E, F>),
-    MatMul(VerifierMatMul<'a, F>),
+pub enum VerifierModule<'a, F:Field> {
+    CNN(VerifierCNN<'a, F>),
+    MatMul(VerifierMatMul<F>),
 }
 
 #[derive(Debug)]
 pub struct VerifierMessages<F: Field>(Vec<F>);
 
-pub struct GeneralVerifier<'a, E: PairingEngine<Fr=F>, F: Field> {
+pub struct GeneralVerifier<'a, F: Field> {
     pub model_exec: ModelExecution<F>,
     pub model_output: F,
     // Created from last layer to first, ie in the order of the proof
-    pub verifier_modules: Vec<VerifierModule<'a, E, F>>,
+    pub verifier_modules: Vec<VerifierModule<'a, F>>,
     pub output_randomness: Vec<F>,
-    pub general_prover_output: Vec<ProverOutput<E, F>>,
-    pub fs_rng: Blake2s512Rng,
+    pub general_prover_output: Vec<ProverOutput<F>>,
+    // pub fs_rng: Blake2s512Rng,
 }
 
 
 
-impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralVerifier<'a, E, F> {
+impl<'a, F: Field + PrimeField> GeneralVerifier<'a, F> {
 
     // Creating the prover submodules
     pub fn setup(&mut self) {
 
-        let mut verifier_modules = Vec::<VerifierModule<E, F>>::new();
+        let mut verifier_modules = Vec::<VerifierModule<F>>::new();
         let mut cnn_module = Vec::<LayerInfoConv<F>>::new();
         let mut initial_randomness = None;
         let mut model_output = None;
@@ -56,7 +56,7 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralVerifier<'a, E, F
                     cnn_module.push(l.clone());
                 },
 
-                LayerInfo::LID(l) => {
+                LayerInfo::LID(_) => {
 
                     if cnn_module.len() >= 1 {
 
@@ -69,7 +69,6 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralVerifier<'a, E, F
                             VerifierModule::CNN(VerifierCNN::new(
                                 cnn_module,
                                 po,
-                                None,
                                 None,
                                 None,
                             ))
@@ -86,11 +85,9 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralVerifier<'a, E, F
 
                     verifier_modules.push(
                         VerifierModule::MatMul(VerifierMatMul::new(
-                            l.clone(),
                             po, 
                             model_output,
-                            initial_randomness,
-                            None,
+                            // initial_randomness,
                         ))
                     );
                     initial_randomness = None;
@@ -111,7 +108,6 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralVerifier<'a, E, F
                         po,
                         model_output,
                         initial_randomness, 
-                        None
                         )
                     )
             );
@@ -121,10 +117,9 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralVerifier<'a, E, F
 
     }
 
-    pub fn verify_model(&'a mut self) {
+    pub fn verify_model(&'a mut self, fs_rng: &mut Blake2s512Rng) {
 
-
-        let mut fs_rng = Some(&mut self.fs_rng);
+        // let mut fs_rng = Some(&mut self.fs_rng);
         let mut init_randomness = self.output_randomness.clone();
         let mut output_eval = self.model_output;
 
@@ -144,10 +139,10 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralVerifier<'a, E, F
                         vm.cnn_output_MLE_eval= Some(output_eval);
                     }
 
-                    vm.fs_rng = fs_rng;
-                    let _ = vm.verify_SC().unwrap();
+                    // vm.fs_rng = fs_rng;
+                    let _ = vm.verify_SC(fs_rng).unwrap();
 
-                    fs_rng = vm.fs_rng.take();
+                    // fs_rng = vm.fs_rng.take();
                     init_randomness = vm.input_randomness.clone().unwrap();
                     output_eval = vm.input_fingerprint.clone().unwrap();
 
@@ -157,17 +152,17 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralVerifier<'a, E, F
 
                     println!("VERIFYING DENSE LAYER");
 
-                    if vm.output_randomness == None {
-                        vm.output_randomness = Some(init_randomness);
-                    }
+                    // if vm.output_randomness == None {
+                    //     vm.output_randomness = Some(init_randomness);
+                    // }
                     if vm.output_eval == None {
                         vm.output_eval= Some(output_eval);
                     }
 
-                    vm.fs_rng = fs_rng.take();
-                    let _ = vm.verify().unwrap();
+                    // vm.fs_rng = fs_rng.take();
+                    let _ = vm.verify(fs_rng).unwrap();
 
-                    fs_rng = vm.fs_rng.take();
+                    // fs_rng = vm.fs_rng.take();
                     init_randomness = vm.input_randomness.clone().unwrap();
                     output_eval = vm.input_fingerprint.clone().unwrap();
                     
@@ -175,4 +170,150 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> GeneralVerifier<'a, E, F
             }
         }
     }
+
+
+    pub fn streaming_verify_all_layers(self, fs_rng: &mut Blake2s512Rng) {
+
+        // let mut init_randomness = self.output_randomness.clone();
+        let mut output_eval = self.model_output;
+
+        // let mut gp_output_iter = self.general_prover_output.iter().rev();
+
+        assert_eq!(self.model_exec.len(), self.general_prover_output.len(), "Numbers of layers and prover length does not match!");
+
+        // for verifier_module in self.verifier_modules.iter_mut().rev() {
+        for layer_prover_output in self.general_prover_output.into_iter().rev() {
+            
+            match layer_prover_output {
+
+                ProverOutput::ConvOutput(prover_output) => {
+
+
+                    // In the streaming proof the prover ou
+                    let (prover_output_conv, prover_output_reshape) = prover_output;
+
+                    // let mut layer_verifier_conv = VerifierConv2D::<E, F>::new(
+                    //     MLE_eval_layer_output,
+                    //     prover_output_conv.clone(),
+                    // );
+
+                    // let verifier_messages_conv = layer_verifier_conv.verify(
+                    //     fs_rng
+                    // ).unwrap();
+
+                    let mut layer_verifier_conv = LayerVerifier::<F>::new(
+                        prover_output_conv.clone(),
+                        output_eval,
+                    );
+        
+                    let _verifier_messages_conv = layer_verifier_conv.verify_SC(
+                        fs_rng
+                    ).unwrap();
+                    
+
+                    // let mut layer_verifier_reshape = VerifierConv2D::<E, F>::new(
+                    //     prover_output_conv.claimed_values.0,
+                    //     prover_output_reshape.clone(),
+                    // );
+
+                    // let verifier_messages_reshape = layer_verifier_reshape.verify(
+                    //     fs_rng
+                    // ).unwrap();
+
+                    let mut layer_verifier_reshape = LayerVerifier::<F>::new(
+                        prover_output_reshape.clone(),
+                        prover_output_conv.claimed_values.0,
+                    );
+        
+                    let _verifier_messages_reshape = layer_verifier_reshape.verify_SC(
+                        fs_rng
+                    ).unwrap();
+                    
+
+                    println!("VERIFYING CNN LAYER");
+
+                    // init_randomness = vm.input_randomness.clone().unwrap();
+                    output_eval = prover_output_reshape.claimed_values.0;
+
+                },
+
+                ProverOutput::DenseOutput(prover_output) => {
+
+                    println!("VERIFYING DENSE LAYER");
+
+                    let mut layer_verifier_matmul = LayerVerifier::<F>::new(
+                        prover_output.clone(),
+                        output_eval,
+                    );
+        
+                    let _verifier_messages_dense = layer_verifier_matmul.verify_SC(
+                        fs_rng
+                    ).unwrap();
+
+                    
+                    output_eval = prover_output.claimed_values.0;
+                    
+                }
+                _ => {panic!("Wrong combination of layer and prover output type!")}
+            }
+        }
+    }
+
+
+    pub fn verify_next_layer(&mut self, gp_layer_output: ProverOutput<F>, fs_rng: &mut Blake2s512Rng) {
+
+        let output_eval = self.model_output;
+
+        match gp_layer_output {
+
+            ProverOutput::ConvOutput(prover_output) => {
+
+                println!("VERIFYING CNN LAYER");
+
+                // In the streaming proof the prover ou
+                let (prover_output_conv, prover_output_reshape) = prover_output;
+
+                let mut layer_verifier_conv = LayerVerifier::<F>::new(
+                    prover_output_conv.clone(),
+                    output_eval,
+                );
+    
+                let _ = layer_verifier_conv.verify_SC(
+                    fs_rng
+                ).unwrap();
+                
+                let mut layer_verifier_reshape = LayerVerifier::<F>::new(
+                    prover_output_reshape.clone(),
+                    prover_output_conv.claimed_values.0,
+                );
+    
+                let _ = layer_verifier_reshape.verify_SC(
+                    fs_rng
+                ).unwrap();
+        
+                self.model_output = prover_output_reshape.claimed_values.0;
+
+            },
+
+            ProverOutput::DenseOutput(prover_output) => {
+
+                println!("VERIFYING DENSE LAYER");
+
+                let mut layer_verifier_matmul = LayerVerifier::<F>::new(
+                    prover_output.clone(),
+                    output_eval,
+                );
+    
+                let _ = layer_verifier_matmul.verify_SC(
+                    fs_rng
+                ).unwrap();
+
+                self.model_output = prover_output.claimed_values.0;
+                
+            }
+            _ => {panic!("Wrong combination of layer and prover output type!")}
+        }
+        
+    }
+
 }

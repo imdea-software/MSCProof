@@ -27,9 +27,9 @@ use itertools::izip;
 
 use derive_new::new;
 
+use crate::layer_verifier::*;
 
-
-use crate::conv::{ProverConvOutput, VerifierConv2D};
+use crate::conv::ProverConvOutput;
 
 use crate::utils::{
     kernel_processing,
@@ -48,9 +48,9 @@ use crate::LayerInfoConv;
 */
 
 #[derive(new)]
-pub struct VerifierCNN<'a, E: PairingEngine<Fr=F>, F: Field> {
+pub struct VerifierCNN<'a, F: Field> {
     pub layers_info: Vec<LayerInfoConv<F>>,
-    pub prover_output: Vec<(ProverConvOutput<E, F>, ProverConvOutput<E, F>)>,
+    pub prover_output: Vec<ProverConvOutput<F>>,
     pub cnn_output_MLE_eval: Option<F>,
     // Randomness of the output of the Conv block
     // ie received from the previous verifier or the initial randomness
@@ -64,7 +64,7 @@ pub struct VerifierCNN<'a, E: PairingEngine<Fr=F>, F: Field> {
     pub input_fingerprint: Option<F>,
     // State of the fs_rng
     // To be transfered to the verifiers
-    pub fs_rng: Option<&'a mut Blake2s512Rng>,
+    // pub fs_rng: Option<&'a mut Blake2s512Rng>,
 
     #[new(default)]
     pub layer_randomness: Vec<(Vec<F>, Vec<F>)>,
@@ -73,9 +73,9 @@ pub struct VerifierCNN<'a, E: PairingEngine<Fr=F>, F: Field> {
 }
 
 
-impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> VerifierCNN<'a, E, F> {
+impl<'a, F: Field + PrimeField> VerifierCNN<'a, F> {
 
-    pub fn verify_SC(&mut self) -> Result<(), Error> {
+    pub fn verify_SC(&mut self, fs_rng: &mut Blake2s512Rng) -> Result<(), Error> {
 
         let mut MLE_eval_layer_output = self.cnn_output_MLE_eval.unwrap();
 
@@ -89,45 +89,35 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> VerifierCNN<'a, E, F> {
 
             println!("VERIFYING LAYER: {:?}", layer_info.name);
             
-            let mut fs_rng = self.fs_rng.take().unwrap();
-        
             let (prover_output_conv, prover_output_reshape) = prover_output;
 
-            let mut layer_verifier_conv = VerifierConv2D::<E, F>::new(
+            let mut layer_verifier_conv = LayerVerifier::<F>::new(
+                prover_output_conv.clone(),
                 MLE_eval_layer_output,
-                fs_rng,
             );
 
-            let verifier_messages_conv = layer_verifier_conv.verify(
-                &prover_output_conv.polynomial.info(),
-                prover_output_conv.proof, 
-                &prover_output_conv.prover_msgs
+            let verifier_messages_conv = layer_verifier_conv.verify_SC(
+                fs_rng
             ).unwrap();
-            
-            fs_rng = layer_verifier_conv.fs_rng;
+        
 
-            let mut layer_verifier_reshape = VerifierConv2D::<E, F>::new(
-                prover_output_conv.proof.0,
-                fs_rng,
+            let mut layer_verifier_reshape = LayerVerifier::<F>::new(
+                prover_output_reshape.clone(),
+                prover_output_conv.claimed_values.0,
             );
 
-            let verifier_messages_reshape = layer_verifier_reshape.verify(
-                &prover_output_reshape.polynomial.info(),
-                prover_output_reshape.proof, 
-                &prover_output_reshape.prover_msgs
+            let verifier_messages_reshape = layer_verifier_reshape.verify_SC(
+                fs_rng
             ).unwrap();
             
-            fs_rng = layer_verifier_reshape.fs_rng;
-            
 
-            MLE_eval_layer_output = prover_output_reshape.proof.0;
+            MLE_eval_layer_output = prover_output_reshape.claimed_values.0;
 
-            kernel_fingerprints.push(prover_output_conv.proof.1);
-            predicate_fingerprints.push(prover_output_reshape.proof.1);
+            kernel_fingerprints.push(prover_output_conv.claimed_values.1);
+            predicate_fingerprints.push(prover_output_reshape.claimed_values.1);
 
 
             self.layer_randomness.push((verifier_messages_conv, verifier_messages_reshape));
-            self.fs_rng = Some(fs_rng);
 
         }
         
@@ -154,10 +144,10 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> VerifierCNN<'a, E, F> {
         self.fingerprints.insert("predicate_fingerprints", predicate_fingerprints);
         self.fingerprints.insert(
             "input_fingerprint", 
-            vec![self.prover_output.last().unwrap().1.proof.0]
+            vec![self.prover_output.last().unwrap().1.claimed_values.0]
         );
 
-        self.input_fingerprint = Some(self.prover_output.last().unwrap().1.proof.0);
+        self.input_fingerprint = Some(self.prover_output.last().unwrap().1.claimed_values.0);
 
         Ok(())
     }
@@ -190,7 +180,6 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> VerifierCNN<'a, E, F> {
 
             println!("VERIFYING FINGERPRINTS LAYER: {:?}", layer_info.name);
 
-
             let (verifier_messages_conv, verifier_messages_reshape) = layer_randomness;
 
             let layer_kernel = layer_info.kernel.clone();
@@ -214,7 +203,6 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> VerifierCNN<'a, E, F> {
 
             let (rxy, rsigma) = verifier_messages_conv.split_at(log2i!(layer_info.dim_kernel.2 * layer_info.dim_kernel.3));
         
-            
             let kernel_randomness = Vec::from(
                 [
                     init_rand_kernel, 
@@ -264,7 +252,7 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> VerifierCNN<'a, E, F> {
     }
 
     // verify commitments for the input, predicates and kernel MLEs
-    pub fn verify_commitments(
+    pub fn verify_commitments<E: PairingEngine<Fr=F>>(
         &self,
         vk: MultilinearVerifierParam<E>,
         prover_commits: HashMap<&'a str, Vec<Commitment<E>>>,

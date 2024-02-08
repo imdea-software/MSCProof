@@ -73,7 +73,7 @@ pub struct ProverCNN<'a, E: PairingEngine<Fr=F>, F: Field> {
 
     // State of the fs_rng
     // To be transfered to the provers
-    pub fs_rng: Option<&'a mut Blake2s512Rng>,
+    // pub fs_rng: Option<&'a mut Blake2s512Rng>,
 
     #[new(default)]
     pub input_randomness: Option<Vec<F>>,
@@ -90,7 +90,7 @@ pub struct ProverCNN<'a, E: PairingEngine<Fr=F>, F: Field> {
     #[new(default)]
     pub openings: HashMap<&'a str, Vec<(MultilinearKzgProof<E>, F)>>,
     #[new(default)]
-    pub layer_outputs: Option<Vec<(ProverConvOutput<E, F>, ProverConvOutput<E, F>)>>,
+    pub layer_outputs: Option<Vec<ProverConvOutput<F>>>,
     #[new(default)]
     pub layer_states: Option<Vec<(ProverState<F>, ProverState<F>)>>,
 
@@ -98,7 +98,7 @@ pub struct ProverCNN<'a, E: PairingEngine<Fr=F>, F: Field> {
     pub times: HashMap<String, u128>,
 }
 
-pub type ProverCNNOutput<E, F> = Vec<(ProverConvOutput<E,F>,ProverConvOutput<E,F>)>;
+pub type ProverCNNOutput<F> = Vec<ProverConvOutput<F>>;
 
 impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverCNN<'a, E, F> {
 
@@ -109,7 +109,7 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverCNN<'a, E, F> {
         let mut predicate_mles: Vec<DenseOrSparseMultilinearExtension<F>> = Vec::new();
 
         for layer_info in self.layers_info.iter() {
-            //kernel processing
+            // kernel processing
             let layer_kernel = layer_info.kernel.clone();
             let dim_kernel = layer_info.dim_kernel;
             let kernel_mle = kernel_processing(layer_kernel, dim_kernel);
@@ -142,7 +142,7 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverCNN<'a, E, F> {
     // Does not consumes self when called 
     // uses the layers as order from network input to network output 
     // so creates the provers using reverse order i.e. from output to input
-    pub fn prove_CNN(&mut self) {
+    pub fn prove_CNN(&mut self, fs_rng: &mut Blake2s512Rng) {
 
         let now = Instant::now();
         if !self.processing_state {
@@ -151,9 +151,9 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverCNN<'a, E, F> {
         let elapsed_time = now.elapsed();
         self.times.insert("preprocessing_time".to_string(), elapsed_time.as_micros());
 
-        let mut prover_outputs: Vec<(ProverConvOutput<E, F>, ProverConvOutput<E, F>)> = Vec::new();
+        let mut prover_outputs: Vec<ProverConvOutput<F>> = Vec::new();
         let mut prover_states: Vec<(ProverState<F>, ProverState<F>)> = Vec::new();
-        let mut init_randomness = self.output_randomness.clone().unwrap();
+        let mut init_randomness = self.output_randomness.clone().expect("No output randomness given to the prover");
 
         let kernel_mles: Vec<DenseOrSparseMultilinearExtension<F>> = match self.kernel_mles.clone() {
             Some(kmles) => {kmles},
@@ -179,8 +179,6 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverCNN<'a, E, F> {
 
             println!("PROVING LAYER: {:?}", layer_info.name);
 
-            let mut fs_rng = self.fs_rng.take().unwrap();
-
             let mut layer_prover = ProverConv2D::<E, F>::new(
                 layer_info.input.clone(),
                 layer_info.kernel.clone(),
@@ -190,7 +188,6 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverCNN<'a, E, F> {
                 layer_info.dim_kernel,
                 Vec::<F>::new(),
                 init_randomness.clone(), 
-                &mut fs_rng,
             );
 
             layer_prover.name = layer_info.name.clone();
@@ -198,7 +195,7 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverCNN<'a, E, F> {
             layer_prover.mles = HashMap::from([("kernel_mle", kernel_mle), ("predicate_mle", predicate_mle)]);
 
             let now_prove = Instant::now();
-            let (layer_output_conv, layer_output_reshape) = layer_prover.prove().unwrap();
+            let (layer_output_conv, layer_output_reshape) = layer_prover.prove(fs_rng).unwrap();
             let elapsed_time_prove = now_prove.elapsed();
             self.times.insert(format!("proving_time_layer_{}", layer_info.name), elapsed_time_prove.as_micros());
 
@@ -222,7 +219,7 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverCNN<'a, E, F> {
             
             self.times.extend(layer_prover.times.into_iter());
 
-            self.fs_rng = Some(fs_rng);
+            // self.fs_rng = Some(fs_rng);
         }
 
         self.layer_outputs = Some(prover_outputs);

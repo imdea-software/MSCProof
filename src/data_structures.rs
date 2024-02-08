@@ -32,7 +32,7 @@ use crate::utils::dense_to_sparse;
 /// $$\sum_{i=0}^{n}C_i\cdot\prod_{j=0}^{m_i}P_{ij}$$
 ///
 /// The result polynomial is used as the prover key.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct ListOfProductsOfPolynomials<F: Field> {
     /// max number of multiplicands in each product
     pub max_multiplicands: usize,
@@ -120,7 +120,7 @@ impl<F: Field> ListOfProductsOfPolynomials<F> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum DenseOrSparseMultilinearExtension<F: Field> {
     SMultilinearExtension(SparseMultilinearExtension<F>),
     DMultilinearExtension(DenseMultilinearExtension<F>),

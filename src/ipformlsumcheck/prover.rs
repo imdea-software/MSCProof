@@ -11,7 +11,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Read, Serializatio
 use ark_std::vec::Vec;
 
 /// Prover Message
-#[derive(Clone, CanonicalSerialize, CanonicalDeserialize, Debug)]
+#[derive(Clone, CanonicalSerialize, CanonicalDeserialize, Debug, PartialEq)]
 pub struct ProverMsg<F: Field> {
     /// evaluations on P(0), P(1), P(2), ...
     pub evaluations: Vec<F>,

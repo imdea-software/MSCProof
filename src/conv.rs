@@ -23,14 +23,15 @@ use derive_new::new;
 use crate::utils::{
     Matrix,
     matrix_reshape,
-    interpolate_uni_poly,
+    interpolate_uni_poly, 
+    matrix_reshape_predicate, 
+    predicate_processing,
 };
 
 use crate::mlsumcheck::*;
 
 use crate::data_structures::{
     ListOfProductsOfPolynomials, 
-    PolynomialInfo, 
     DenseOrSparseMultilinearExtension
 };
 
@@ -39,6 +40,7 @@ use crate::ipformlsumcheck::prover::{
         ProverState,
 };
 
+use crate::LayerProverOutput;
 
 #[derive(new)]
 pub struct ProverConv2D<'a, E: PairingEngine<Fr=F>, F: Field> {
@@ -59,7 +61,7 @@ pub struct ProverConv2D<'a, E: PairingEngine<Fr=F>, F: Field> {
 
     // State of the fs_rng
     // To be transfered to the next prover
-    pub fs_rng: &'a mut Blake2s512Rng,
+    // pub fs_rng: &'a mut Blake2s512Rng,
 
     // Commitment key if necessary
     #[new(default)]
@@ -86,9 +88,9 @@ pub struct ProverConv2D<'a, E: PairingEngine<Fr=F>, F: Field> {
 }
 
 #[derive(new, Clone)]
-pub struct ProverConvOutput<E: PairingEngine, F: Field> {
+pub struct ProverSCOutput<E: PairingEngine, F: Field> {
     // Proof of MLSC
-    pub proof: (F,F),
+    pub claimed_values: (F,F),
     pub prover_msgs: Vec<ProverMsg<F>>,
     pub polynomial: ListOfProductsOfPolynomials<F>,
 
@@ -98,17 +100,17 @@ pub struct ProverConvOutput<E: PairingEngine, F: Field> {
 
 }
 
+pub type ProverConvOutput<F> = (LayerProverOutput<F>,LayerProverOutput<F>);
+
 
 #[derive(new)]
 pub struct VerifierConv2D<'a, E: PairingEngine<Fr=F>, F: Field> {
     
     pub conv_output_eval: F,
+    pub prover_output: ProverSCOutput<E,F>,
+    
     #[new(default)]
     pub vk: Option<&'a MultilinearVerifierParam<E>>,
-    
-    // State of the fs_rng
-    // To be transfered to the next verifier
-    pub fs_rng: &'a mut Blake2s512Rng,
 
     // Random challenges "sent" to the prover (using FS)
     #[new(default)]
@@ -331,7 +333,20 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverConv2D<'a, E, F> {
                 p.clone()
             },
             None => {
-                panic!("The predicate function was not processed or added to the local prover.")
+                // predicate processing
+                let (predicate, dim_input_reshape) = matrix_reshape_predicate(
+                    self.dim_input,
+                    self.dim_kernel, 
+                    self.padding,
+                    self.strides, 
+                );
+                let predicate_mle = predicate_processing::<F>(
+                    predicate, 
+                    self.dim_input, 
+                    dim_input_reshape
+                );
+                predicate_mle
+                // panic!("The predicate function was not processed or added to the local prover.")
             }
         };
 
@@ -376,7 +391,7 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverConv2D<'a, E, F> {
 
     }
 
-    pub fn prove(&mut self) -> Result<(ProverConvOutput<E,F>, ProverConvOutput<E,F>), Error> 
+    pub fn prove(&mut self, fs_rng: &mut Blake2s512Rng) -> Result<ProverConvOutput<F>, Error> 
     {
 
         /* ---- First sumcheck to prove the convolution --- */
@@ -386,20 +401,24 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverConv2D<'a, E, F> {
             return Err(Error::OtherError("Polynomial is a constant. Aborting for now.".to_string()))
         }
 
-        self.fs_rng.feed(&polynomial_conv.info()).unwrap();
+        // self.fs_rng.feed(&polynomial_conv.info()).unwrap();
+        fs_rng.feed(&polynomial_conv.info()).unwrap();
 
         let now = Instant::now();
         let (prover_msgs, mut prover_state) = MLSC::prove(
             &polynomial_conv, 
-            &mut self.fs_rng
+            // &mut self.fs_rng
+            fs_rng
         ).unwrap();
         let elapsed_time = now.elapsed();
         self.times.insert(format!("time_mlsc_conv_{}", self.name), elapsed_time.as_micros());
 
-        let oracle_randomness = &[F::rand(&mut self.fs_rng)];
+        // let oracle_randomness = &[F::rand(&mut self.fs_rng)];
+        let oracle_randomness = &[F::rand(fs_rng)];
 
         prover_state.randomness.push(oracle_randomness[0]);
-        self.fs_rng.feed(&oracle_randomness[0]).unwrap();
+        // self.fs_rng.feed(&oracle_randomness[0]).unwrap();
+        fs_rng.feed(&oracle_randomness[0]).unwrap();
 
         let proof_conv = Self::final_oracle_access(&prover_state, oracle_randomness);
 
@@ -408,20 +427,24 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverConv2D<'a, E, F> {
         let polynomial_reshape =  self.predicate_processing(
             prover_state.randomness.as_slice()
         );
-        self.fs_rng.feed(&polynomial_reshape.info()).unwrap();
+        // self.fs_rng.feed(&polynomial_reshape.info()).unwrap();
+        fs_rng.feed(&polynomial_reshape.info()).unwrap();
 
         let now = Instant::now();
         let (prover_msgs_reshape, mut prover_state_reshape) = MLSC::prove(
             &polynomial_reshape, 
-            &mut self.fs_rng
+            // &mut self.fs_rng
+            fs_rng
         ).unwrap();
         let elapsed_time = now.elapsed();
         self.times.insert(format!("time_mlsc_reshape_{}", self.name), elapsed_time.as_micros());
 
-        let oracle_randomness = &[F::rand(self.fs_rng)];
+        // let oracle_randomness = &[F::rand(self.fs_rng)];
+        let oracle_randomness = &[F::rand(fs_rng)];
 
         prover_state_reshape.randomness.push(oracle_randomness[0]);
-        self.fs_rng.feed(&oracle_randomness[0]).unwrap();
+        // self.fs_rng.feed(&oracle_randomness[0]).unwrap();
+        fs_rng.feed(&oracle_randomness[0]).unwrap();
 
         let proof_reshape = Self::final_oracle_access(&prover_state_reshape, oracle_randomness);
 
@@ -429,22 +452,33 @@ impl<'a, E: PairingEngine<Fr=F>, F: Field + PrimeField> ProverConv2D<'a, E, F> {
         self.prover_state_reshape = Some(prover_state_reshape);
 
 
-        let output_conv = ProverConvOutput {
-            proof: proof_conv,
+        // let output_conv = ProverSCOutput {
+        //     claimed_values: proof_conv,
+        //     prover_msgs: prover_msgs,
+        //     polynomial: polynomial_conv,
+        //     input_opening: None,
+        //     kernel_opening: None,
+        // };
+
+        // let output_reshape = ProverSCOutput {
+        //     claimed_values: proof_reshape,
+        //     prover_msgs: prover_msgs_reshape,
+        //     polynomial: polynomial_reshape,
+        //     input_opening: None,
+        //     kernel_opening: None,
+        // };
+        let output_conv = LayerProverOutput {
+            claimed_values: proof_conv,
             prover_msgs: prover_msgs,
             polynomial: polynomial_conv,
-            input_opening: None,
-            kernel_opening: None,
         };
 
-        let output_reshape = ProverConvOutput {
-            proof: proof_reshape,
+        let output_reshape = LayerProverOutput {
+            claimed_values: proof_reshape,
             prover_msgs: prover_msgs_reshape,
             polynomial: polynomial_reshape,
-            input_opening: None,
-            kernel_opening: None,
         };
-
+        
         Ok((output_conv, output_reshape))
 
     }
@@ -477,12 +511,14 @@ impl<'a, F: Field + PrimeField, E: PairingEngine<Fr=F>> VerifierConv2D<'a,E,F> {
     // verify the claimed sum using the proof
     pub fn verify(
         &mut self,
-        polynomial_info: &PolynomialInfo,
-        claimed_values: (F,F), 
-        prover_msgs: &Proof<F>,
+        fs_rng: &mut Blake2s512Rng
         ) -> Result<Vec<F>, Error> 
     {
-        self.fs_rng.feed(polynomial_info)?;
+        let polynomial_info = self.prover_output.polynomial.info();
+        let prover_msgs = &self.prover_output.prover_msgs;
+        let claimed_values = self.prover_output.claimed_values;
+
+        fs_rng.feed(&polynomial_info)?;
 
         let prover_first_msg1 = prover_msgs[0].evaluations[0];
         let prover_first_msg2 = prover_msgs[0].evaluations[1];    
@@ -495,9 +531,9 @@ impl<'a, F: Field + PrimeField, E: PairingEngine<Fr=F>> VerifierConv2D<'a,E,F> {
         let mut challenge_vec = Vec::new();        
         for i in 0..(polynomial_info.num_variables - 1) {
             let round_prover_msg = &prover_msgs[i].evaluations;
-            self.fs_rng.feed(round_prover_msg)?;
+            fs_rng.feed(round_prover_msg)?;
 
-            let round_challenge = F::rand(&mut self.fs_rng);
+            let round_challenge = F::rand(fs_rng);
             challenge_vec.push(round_challenge);
             let round_interpolation = interpolate_uni_poly::<F>(round_prover_msg, round_challenge);
             let round_claimed_sum: F = prover_msgs[i+1].evaluations[0] + prover_msgs[i+1].evaluations[1];
@@ -509,11 +545,11 @@ impl<'a, F: Field + PrimeField, E: PairingEngine<Fr=F>> VerifierConv2D<'a,E,F> {
 
         // Last round
         let last_prover_msg = &prover_msgs[polynomial_info.num_variables-1].evaluations;
-        self.fs_rng.feed(last_prover_msg)?;
+        fs_rng.feed(last_prover_msg)?;
 
         // Same as oracle randomness
-        let last_challenge = F::rand(&mut self.fs_rng);
-        self.fs_rng.feed(&last_challenge)?;
+        let last_challenge = F::rand(fs_rng);
+        fs_rng.feed(&last_challenge)?;
         challenge_vec.push(last_challenge);
 
         let last_interpolation = interpolate_uni_poly::<F>(last_prover_msg, last_challenge);

@@ -5,6 +5,7 @@ use ark_ff::{Field, PrimeField, Zero};
 
 use ark_poly::{DenseMultilinearExtension, SparseMultilinearExtension};
 
+// use ark_bls12_381::Fr;
 
 use ark_serialize::CanonicalSerialize;
 
@@ -28,11 +29,6 @@ use crate::data_structures::DenseOrSparseMultilinearExtension;
 
 use crate::LayerInfo;
 
-
-#[derive(Debug, Clone)]
-pub struct ProverMsgMod<F: Field> {
-    pub evaluations: Vec<F>,
-}
 
 
 // the lifetime is here so we can use a reference and not move the value when we print it
@@ -95,7 +91,7 @@ macro_rules! log2i {
     };
 }
 
-// Computes the binary reverse number of n
+// Computes the binary reverse number of n (uint)
 // with zeros padding to the left to N bits i.e.
 // if n = 7 and N = 4 then bin(n) = 111, padded(bin(n),N) = 0111
 // and reversed(padded(bin(n))) = 1110 = 14
@@ -136,6 +132,15 @@ macro_rules! get_padding_and_strides {
             }
         }
     };
+}
+
+// Given the size of the convolution input, kernel, padding and strides
+// computes output size of one dimension
+#[macro_export]
+macro_rules! get_output_size {
+    ($di: expr, $dk: expr, $p: expr, $s: expr) => {
+        ($di - $dk + $p) / $s + 1
+    }
 }
 
 pub type Matrix<T> = Vec<Vec<T>>;
@@ -195,7 +200,7 @@ pub fn matrix_to_mle<F: Field>(
         num_vars_0 + num_vars_1,
         poly_evals
     );
-    drop(matrix);
+    // drop(matrix);
     return (poly, num_vars_0, num_vars_1);
 }
 
@@ -380,14 +385,13 @@ pub fn convolution_as_matmul<T>(
             let mut slice = output.slice_mut(s![chout,..,..]).into_shape(output_dim.1 * output_dim.2).unwrap();
             slice += &conv_result.clone();
         }
-
     }
 
     output
 }
 
 
-// Convert a slice of u32 into a matrix of field element
+// Convert a slice of u32 into a 3D matrix of field element
 pub fn matrix_encoder<F: Field>(values: &[u32], dim: (usize, usize, usize)) -> Vec<Matrix<F>> {
     let (channel, rows, cols) = dim;
     assert_eq!(rows * cols * channel, values.len());
@@ -408,7 +412,7 @@ pub fn matrix_encoder<F: Field>(values: &[u32], dim: (usize, usize, usize)) -> V
 }
 
 
-// Convert a slice of field element into a Matrix
+// Convert a slice of field element into a 2D Matrix
 pub fn field_matrix_encoder<T: Copy>(values: &[T], rows: usize, cols: usize) -> Matrix<T> {
     assert_eq!(rows * cols, values.len());
     let mut mat = Vec::with_capacity(rows);
@@ -422,7 +426,7 @@ pub fn field_matrix_encoder<T: Copy>(values: &[T], rows: usize, cols: usize) -> 
     mat
 }
 
-// Convert a slice of field element into a Matrix with multiple channels
+// Convert a slice of field element into a 3D Matrix with multiple channels
 pub fn field_matrix_encoder_multichannel<T: Copy>(
     values: &[T],
     dim: (usize, usize, usize),
@@ -444,7 +448,7 @@ pub fn field_matrix_encoder_multichannel<T: Copy>(
     mat
 }
 
-// Convert a slice of field element into a vector with multiple channels
+// Convert a slice of field element into a 3D matrix with multiple channels
 // following the dimension order: dim_in, dim_out, xy
 pub fn field_kernel_encoder_multichannel<T: Copy>(
     values: &[T],
@@ -471,7 +475,7 @@ pub fn field_kernel_encoder_multichannel<T: Copy>(
     mat
 }
 
-// Convert a slice of field element into a Matrix with multiple channels
+// Convert a slice of field element into a 4D Matrix with multiple channels
 // following the dimension order: dim_in, dim_out, x, y
 pub fn field_kernel_encoder_multichannel_matrix_for_conv<T: Copy>(
     values: &[T],
@@ -2160,4 +2164,34 @@ pub fn generate_random_VGG11_execution<F: Field + PrimeField, R: Rng>(
 
 
     Ok(layers_dense)
+}
+
+
+pub fn extract_dense_layers() {
+    use ark_bls12_381::Bls12_381;
+    use ark_ec::PairingEngine;
+
+    use std::io::Read;
+    use ark_serialize::CanonicalDeserialize;
+
+    type E = Bls12_381;
+    type Fr = <E as PairingEngine>::Fr;
+
+    let mut save_file = File::open("VGG11_dense4096_execution_description.txt").unwrap();
+    let mut file_content = Vec::new();
+    save_file
+        .read_to_end(&mut file_content)
+        .unwrap();
+
+
+    let mut layers_dense = Vec::<LayerInfoDense<Fr>>::deserialize(file_content.as_slice()).unwrap();
+
+    let l = layers_dense.remove(0);
+    drop(layers_dense);
+
+    let mut compressed_struct = Vec::<u8>::new();
+    l.serialize(&mut compressed_struct).unwrap();
+    let mut buffer_struct = BufWriter::new(File::create("VGG11_dense4096_1_execution_description.txt").unwrap());
+    buffer_struct.write_all(&compressed_struct).unwrap();
+    
 }

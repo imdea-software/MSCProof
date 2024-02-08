@@ -11,7 +11,7 @@ use derive_new::new;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::{mlsumcheck::*, LayerInfoDense};
+use crate::{mlsumcheck::*, LayerProverOutput};
 use crate::utils::{
     Matrix,
     interpolate_uni_poly,
@@ -24,18 +24,18 @@ use crate::ipformlsumcheck::prover::{
 };
 
 #[derive(new)]
-pub struct ProverMatMul<'a, F: Field> {
+pub struct ProverMatMul<F: Field> {
     pub mat_L: Matrix<F>,
     pub mat_R: Matrix<F>,
 
     pub dim_L: (usize, usize),
     pub dim_R: (usize, usize),
 
-    pub initial_randomness: Option<Vec<F>>,
+    pub initial_randomness: Vec<F>,
 
     // State of the fs_rng
     // To be transfered to the next prover
-    pub fs_rng: Option<&'a mut Blake2s512Rng>,
+    // pub fs_rng: Option<&'a mut Blake2s512Rng>,
 
     #[new(default)]
     pub times: HashMap<String, u128>,
@@ -56,16 +56,14 @@ pub struct ProverMatMulOutput<F: Field> {
 
 
 #[derive(new)]
-pub struct VerifierMatMul<'a, F: Field> {
-    pub layers_info: LayerInfoDense<F>,
-    pub prover_output: ProverMatMulOutput<F>,
+pub struct VerifierMatMul<F: Field> {
+    pub prover_output: LayerProverOutput<F>,
 
     pub output_eval: Option<F>,
-    pub output_randomness: Option<Vec<F>>,
 
     // State of the fs_rng
     // To be transfered to the next prover
-    pub fs_rng: Option<&'a mut Blake2s512Rng>,
+    // pub fs_rng: Option<&'a mut Blake2s512Rng>,
 
     #[new(default)]
     pub input_randomness: Option<Vec<F>>,
@@ -78,7 +76,7 @@ pub struct VerifierMatMul<'a, F: Field> {
 
 // Should take as input the two matrices and process them to be used by MLSC
 // then do the variable fix and outputs the final values for the verifier
-impl<'a, F: Field + PrimeField> ProverMatMul<'a, F> {
+impl<F: Field + PrimeField> ProverMatMul<F> {
 
     pub fn matrix_processing(&mut self) -> ListOfProductsOfPolynomials<F> {
 
@@ -87,7 +85,7 @@ impl<'a, F: Field + PrimeField> ProverMatMul<'a, F> {
         
         let mut mle_mat_L = DenseOrSparseMultilinearExtension::from(mle_mat_L);
         
-        let initial_randomness = self.initial_randomness.clone().unwrap();
+        let initial_randomness = self.initial_randomness.clone();
         let (init_rand_a, init_rand_b) = initial_randomness.split_at(mat_L_x_nv);
 
         let now = Instant::now();
@@ -117,33 +115,31 @@ impl<'a, F: Field + PrimeField> ProverMatMul<'a, F> {
         poly
     }
 
-    pub fn prove(&mut self) -> Result<
-            ProverMatMulOutput<F>,
+    pub fn prove(&mut self, fs_rng: &mut Blake2s512Rng) -> Result<
+            LayerProverOutput<F>,
             Error
             > 
         {
 
         let polynomial = self.matrix_processing();
-        let mut local_rng = self.fs_rng.take().unwrap();
-        local_rng.feed(&polynomial.info()).unwrap();
+        fs_rng.feed(&polynomial.info()).unwrap();
 
         let now = Instant::now();
         let (prover_msgs, mut prover_state) = MLSC::prove(
             &polynomial, 
-            &mut local_rng
+            fs_rng
         ).unwrap();
         let elapsed_time = now.elapsed();
         self.times.insert(format!("time_SC_{}", self.name), elapsed_time.as_micros());
         
-        let oracle_randomness = &[F::rand(&mut local_rng)];
+        let oracle_randomness = &[F::rand(fs_rng)];
         prover_state.randomness.push(oracle_randomness[0]);
-        local_rng.feed(&oracle_randomness[0]).unwrap();
+        fs_rng.feed(&oracle_randomness[0]).unwrap();
 
-        self.fs_rng = Some(local_rng);
         self.input_randomness = Some(prover_state.randomness.clone());
         
         Ok(
-            ProverMatMulOutput { 
+            LayerProverOutput { 
                 claimed_values: Self::final_oracle_access(&prover_state, oracle_randomness), 
                 prover_msgs: prover_msgs, 
                 polynomial: polynomial,
@@ -168,20 +164,20 @@ impl<'a, F: Field + PrimeField> ProverMatMul<'a, F> {
 }
 
 
-impl<'a, F: Field> VerifierMatMul<'a, F> {
+impl<'a, F: Field> VerifierMatMul<F> {
 
     // verify the claimed sum using the proof
-    pub fn verify(&mut self) -> Result<Vec<F>, Error> {
+    pub fn verify(&mut self, fs_rng: &mut Blake2s512Rng) -> Result<Vec<F>, Error> {
 
         let poly_info = self.prover_output.polynomial.info();
-        let proof = &self.prover_output.prover_msgs;
+        let prover_msgs = &self.prover_output.prover_msgs;
         let claimed_values = self.prover_output.claimed_values;
         
-        let mut local_rng = self.fs_rng.take().unwrap();
-        local_rng.feed(&poly_info)?;
+        // let mut local_rng = self.fs_rng.take().unwrap();
+        fs_rng.feed(&poly_info)?;
 
-        let prover_first_msg1 = proof[0].evaluations[0];
-        let prover_first_msg2 = proof[0].evaluations[1];
+        let prover_first_msg1 = prover_msgs[0].evaluations[0];
+        let prover_first_msg2 = prover_msgs[0].evaluations[1];
 
         let first_claimed_sum = prover_first_msg1 + prover_first_msg2;
         if self.output_eval.unwrap() != first_claimed_sum {
@@ -195,13 +191,13 @@ impl<'a, F: Field> VerifierMatMul<'a, F> {
         // loop over the number of variables - 1 as the last test is done between the last
         // messages and the product of the claimed values
         for i in 0..(poly_info.num_variables - 1) {
-            let round_prover_msg = &proof[i].evaluations;
-            local_rng.feed(round_prover_msg)?;
-            let round_challenge = F::rand(&mut local_rng);
+            let round_prover_msg = &prover_msgs[i].evaluations;
+            fs_rng.feed(round_prover_msg)?;
+            let round_challenge = F::rand(fs_rng);
             challenge_vec.push(round_challenge);
             let round_interpolation = interpolate_uni_poly::<F>(round_prover_msg, round_challenge);
             let round_claimed_sum: F =
-                proof[i + 1].evaluations[0] + proof[i + 1].evaluations[1];
+                prover_msgs[i + 1].evaluations[0] + prover_msgs[i + 1].evaluations[1];
             if round_interpolation != round_claimed_sum {
                 return Err(Error::Reject(Some(
                     "Prover message is inconsistent with the claim.".into(),
@@ -210,11 +206,11 @@ impl<'a, F: Field> VerifierMatMul<'a, F> {
         }
 
         // Last round
-        let last_prover_msg = &proof[poly_info.num_variables - 1].evaluations;
-        local_rng.feed(last_prover_msg)?;
+        let last_prover_msg = &prover_msgs[poly_info.num_variables - 1].evaluations;
+        fs_rng.feed(last_prover_msg)?;
         // Same as oracle randomness
-        let last_challenge = F::rand(&mut local_rng);
-        local_rng.feed(&last_challenge)?;
+        let last_challenge = F::rand(fs_rng);
+        fs_rng.feed(&last_challenge)?;
         challenge_vec.push(last_challenge);
         let last_interpolation = interpolate_uni_poly::<F>(last_prover_msg, last_challenge);
         let prover_claimed_value = claimed_values.0 * claimed_values.1;
@@ -227,7 +223,7 @@ impl<'a, F: Field> VerifierMatMul<'a, F> {
             )));
         }
 
-        self.fs_rng = Some(local_rng);
+        // self.fs_rng = Some(fs_rng);
         self.input_randomness = Some(challenge_vec.clone());
         self.input_fingerprint = Some(claimed_values.0);
 
