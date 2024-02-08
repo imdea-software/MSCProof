@@ -56,3 +56,8 @@ Our benchmarks can be run simply via `cargo bench`. We provide a benchmarking mo
 
 The running time measured by these benchmarks does not include the generation and preparation of the computation inputs. It does include the time required for fixing all the required variables in the multilinear extensions in preparation for the proof.
 
+Coming soon: Extended benchmark for all VGG11 layers.
+
+## Acknowledgements
+This work has received funding by: the European Research Council (ERC) under the European Union’s Horizon 2020 research and innovation program under project PICOCRYPT (grant agreement No. 101001283), by projects PRODIGY (TED2021-132464B-I00) and ESPADA (PID2022-142290OB-I00) funded by MCIN/AEI/10.13039/501100011033/ and the European Union NextGenerationEU / PRTR, and by Ministerio de Universidades (FPU21/00600).
+
